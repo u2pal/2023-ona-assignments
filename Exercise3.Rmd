@@ -1,0 +1,221 @@
+---
+title: "Exercise 3"
+author: "Utkarsh Pal"
+date: "2023-03-28"
+output: pdf_document
+---
+
+# Advice Network at USPTO
+
+## Loading the Packages:
+```{r Loading Packages}
+library(readr)
+library(arrow)
+library(gender)
+library(dplyr)
+library(tidyr)
+library(wru)
+library(ymd)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(igraph)
+```
+
+## Loading the files and adding gender, race, and tenure for each examiner
+```{r Data Load}
+applications = read_parquet("C:\\Users\\Utkarsh\\Desktop\\app_data_sample.parquet")
+edges = read_csv("C:\\Users\\Utkarsh\\Desktop\\edges_sample.csv")
+
+# Gender
+examiner_names <- applications %>% distinct(examiner_name_first)
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(examiner_name_first = name, gender, proportion_female)
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# Race
+examiner_surnames <- applications %>% select(surname = examiner_name_last) %>% distinct()
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% as_tibble()
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+
+# Tenure
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date)
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+  ) %>% 
+  filter(year(latest_date)<2018)
+applications <- applications %>% left_join(examiner_dates, by = "examiner_id")
+
+applications <- applications %>%
+  mutate(tenure_years = tenure_days / 365) %>%
+  mutate(tenure_range = case_when(
+    tenure_years < 6  ~ '<6',
+    tenure_years <= 10 ~ '6-10',
+    tenure_years <= 15 ~ '11-15',
+    tenure_years <= 19 ~ '16-19',
+    tenure_years <= 100 ~ '20+',
+    TRUE ~ NA_character_
+  ))
+
+# Workgroups
+applications <- applications %>% 
+  mutate(examiner_workgroup = str_sub(examiner_art_unit, 1, -2))
+# Drop NAs
+applications <- applications %>% drop_na(gender, tenure_days, race)
+```
+
+## Filtering Work Groups: 171 & 172
+```{r Work Groups}
+# Picking two work groups:
+wrkgrp_1 <- "171"
+wrkgrp_2 <- "172"
+
+wrkgrp <- applications %>%
+  filter(examiner_workgroup %in% c(wrkgrp_1, wrkgrp_2))
+```
+
+## Summary Statistics & Plots
+### Gender
+```{r Gender}
+gender <- wrkgrp %>%
+  group_by(examiner_workgroup, gender) %>%
+  summarise(count = n()) %>%
+  group_by(examiner_workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(examiner_workgroup, count, .by_group = TRUE)
+
+gender_plot <- wrkgrp %>%
+  ggplot(aes(x = gender, fill = gender)) + geom_bar() +
+  facet_wrap(~examiner_workgroup) +
+  labs(title = "Gender Distribution",
+       x = "Gender",
+       y = "Count") +
+  theme(axis.text.x = element_blank())
+
+### Summary Statistics
+print(gender)
+### Plot
+print(gender_plot)
+```
+
+### Race
+```{r Race}
+race <- wrkgrp %>%
+  group_by(examiner_workgroup, race) %>%
+  summarise(count = n()) %>%
+  group_by(examiner_workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(examiner_workgroup, count, .by_group = TRUE)
+
+race_plot <- wrkgrp %>%
+  ggplot(aes(x = race, fill = race)) + geom_bar() +
+  facet_wrap(~examiner_workgroup) +
+  labs(title = "Race Distribution",
+       x = "Race",
+       y = "Count") +
+  theme(axis.text.x = element_blank())
+
+### Summary Statistics
+print(race)
+### Plot
+print(race_plot)
+```
+
+
+### Tenure (Years)
+```{r Tenure}
+tenure <- wrkgrp %>%
+  group_by(examiner_workgroup, tenure_range) %>%
+  summarise(count = n()) %>%
+  group_by(examiner_workgroup) %>%
+  mutate(total_count = sum(count),
+         percentage = count/total_count * 100) %>%
+  select(-total_count) %>%
+  arrange(examiner_workgroup, count, .by_group = TRUE)
+
+tenure_plot <- wrkgrp %>%
+  ggplot(aes(x = tenure_range, fill = tenure_range)) + geom_bar() +
+  facet_wrap(~examiner_workgroup) +
+  labs(title = "Tenure Distribution",
+       x = "Tenure Range",
+       y = "Count") +
+  theme(axis.text.x = element_blank())
+
+### Summary Statistics
+print(tenure)
+### Plot
+print(tenure_plot)
+```
+
+### Work groups 171 and 172 are very similar in terms of demographic attributes after removing observations with missing values. There are a majority of male examiners at 67.87% in work group 171 compared to female examiners at 32.13%. Similarly, in work group 172, 71.56% of examiners are male and the remaining 28.44% are female. Both work groups have a majority of White examiners, a small yet significant minority of Asians, and a very small minority of Black and Hispanic examiners. 74.78% of examiners in work group 171 are White, 19.15% are Asian, 3.01% are Hispanic, and 3.04% are Black. In work group 172, the breakdown is 82.65% White, 13.82% Asian, 2.48% Hispanic, and 1.04% Black. Both work groups have a large number of examiners with a high level of tenure. In both work groups, the overwhelming majority (greater than 60%) of examiners fall under 16-19 years of tenure. The next largest cluster for both work groups is the 11-15 years of tenure (both have over 25% in this cluster).
+
+## Creating advice networks from 'edges_sample'
+### I will be using degree and betweenness centrality, since the former is helpful in identifying the most "popular" or "well-connected" nodes in the network and the latter is useful for identifying the nodes that are most critical for facilitating communication and coordination between different parts of the network.
+
+### Plot
+```{r Plot2}
+g <- graph_from_data_frame(edges[, c("ego_examiner_id", "alter_examiner_id")], directed = TRUE)
+matcher <- applications %>% 
+  select(examiner_id, examiner_workgroup) %>% 
+  distinct()
+
+V(g)$workgroup <- matcher$examiner_workgroup[match(V(g)$name, matcher$examiner_id)]
+gNew <- g %>% 
+  induced_subgraph(V(g)[V(g)$workgroup %in% c(wrkgrp_1, wrkgrp_2)])
+
+colors_condition <- ifelse(V(gNew)$workgroup == wrkgrp_1, 'blue', 'red')
+plot(gNew, vertex.color = colors_condition,
+     vertex.label = NA,
+     vertex.size = 7,
+     edge.arrow.size = 0.3,
+     main = "Work Groups 171 (Blue) and 172 (Red)")
+```
+
+### Centralities
+```{r Centralities}
+degree_centrality <- degree(gNew, mode = "all")
+betweenness_centrality <- betweenness(gNew, directed = TRUE)
+V(gNew)$degree_centrality <- degree_centrality
+V(gNew)$betweenness_centrality <- betweenness_centrality
+centralities <- data.frame(
+  examiner_id = V(gNew)$name,
+  workgroup = V(gNew)$workgroup,
+  degree_centrality = V(gNew)$degree_centrality,
+  betweenness_centrality = V(gNew)$betweenness_centrality
+)
+class(centralities$examiner_id)
+centralities$examiner_id <- as.numeric(centralities$examiner_id)
+
+connections <- applications %>%
+  select(examiner_id, gender, race, tenure_days) %>%
+  inner_join(centralities, by = "examiner_id") %>%
+  distinct(examiner_id, .keep_all = TRUE)
+print(connections)
+```
+
